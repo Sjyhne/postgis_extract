@@ -1,48 +1,7 @@
 from postgisutils import get_cursor
+from data_structs import Graph, Node, Edge, Polygon
 
-import re
 import json
-
-from structures.point import Point
-from structures.linestringz import LineStringZ
-
-from collections import defaultdict
-
-
-def parse_linestringz(wkt):
-    """
-    Parses a LINESTRING Z in WKT format and returns coordinates as a list of tuples.
-    
-    Args:
-    - wkt (str): The LINESTRING Z in WKT format.
-    
-    Returns:
-    - List[Tuple[float, float, float]]: A list of tuples containing the X, Y, and Z coordinates.
-    """
-    
-    if type(wkt) == tuple:
-        wkt = wkt[0]
-    
-    # Extract the SRID
-    srid_match = re.search(r"SRID=(\d+);", wkt)
-    if srid_match:
-        srid = int(srid_match.group(1))
-    else:
-        raise ValueError("Input does not have a valid SRID declaration.")
-    
-    # Extract the content inside the parentheses
-    content = re.search(r"LINESTRING\s*\((.*)\)", wkt).group(1)
-    
-    # Split by comma and then split each segment by space to get X, Y, Z
-    points = [tuple(map(float, segment.split())) for segment in content.split(",")]
-    
-    start_point = Point(points[0], srid)
-    end_point = Point(points[1], srid)
-    
-    linez = LineStringZ(start_point, end_point)
-    
-    return linez
-
 
 def get_query(x1, y1, x2, y2, srid):
     with open("test_query.sql", "r") as f:
@@ -53,351 +12,238 @@ def get_query(x1, y1, x2, y2, srid):
         query = query.replace("maxY", str(y2))
         query = query.replace("srid", str(srid))
         # Temporary
-        query = query.replace("fkb_bygning", "fkb_bygning_42")
+        query = query.replace("fkb_bygning", "fkb_bygning_42") # Only choose
 
     return query
 
 
-    """
-        feature = dict(type="Feature", properties=dict(id=building_id), geometry=object)
-        features.append(feature)
+def generate_geojson(polygon):
+    """Generate a GeoJSON representation for a given polygon."""
     
-    return features
-    """ 
+    coordinates = [[node.x, node.y, node.z] for node in polygon.nodes]
+    coordinates.append(coordinates[0])  # Close the loop
 
-def extract_objects(objects, building_id):
-    features = list()
+    return {
+        "type": "Feature",
+        "geometry": {
+            "type": "Polygon",
+            "coordinates": [coordinates]
+        },
+        "properties": {}
+    }
+
+# Split edges that have a node directly on them
+def split_edges(graph):
+    edges_to_remove = []
+    edges_to_add = []
+
+    for edge in graph.edges:
+        for node in graph.nodes:
+            if node not in [edge.node1, edge.node2] and is_point_on_line(node, edge):
+                edges_to_remove.append(edge)
+                edges_to_add.append(Edge(edge.node1, node))
+                edges_to_add.append(Edge(node, edge.node2))
+                break  # Once we split an edge for one node, we don't want to check other nodes for the same edge
+
+    # Update the graph's edges
+    for edge in edges_to_remove:
+        graph.edges.remove(edge)
+    for edge in edges_to_add:
+        graph.edges.append(edge)
+
+    return graph
     
-    for object in objects:
-        object = json.loads(object)
-        object.pop("crs", None)
-        
-        feature = dict(type="Feature", properties=dict(id=building_id), geometry=object)
-        features.append(feature)
-    
-    return features
+def is_point_on_line(node, edge):
+    # This is a simple method to determine if a point lies on a line segment.
+    # It checks if the sum of distances from the point to the line segment's endpoints is equal to the distance between the endpoints.
+    d1 = distance(node, edge.node1)
+    d2 = distance(node, edge.node2)
+    d_total = distance(edge.node1, edge.node2)
 
-    
-def extract_points(objects, building_id):
-    points = list()
-    
-    
-    for object in objects:
-        object = json.loads(object)
-        object.pop("crs", None)        
-        
-        # Go through all coordinates
-        for coordinate in object["coordinates"]:
-            # Round for duplicate removal later
-            # coordinate = [round(c) for c in coordinate]
-            points.append(coordinate)
-        
-    # Remove duplicates
-    points = list(set([list(p) for p in points]))
-    
-    features = list()
-    
-    # Create point geometry, then add as feature with building id
-    for point in points:
-        point = dict(type="Point", coordinates=point)
-        feature = dict(type="Feature", properties=dict(id=building_id), geometry=point)
-        features.append(feature)
-    return features
+    return abs(d1 + d2 - d_total) < 1e-2  # We use a small threshold to account for floating point inaccuracies.
+
+def distance(node1, node2):
+    return ((node1.x - node2.x)**2 + (node1.y - node2.y)**2 + (node1.z - node2.z)**2) ** 0.5
 
 
-from collections import defaultdict
-
-
-class Node:
-    def __init__(self, coords):
-        self.coords = coords
-        self.edge_nodes = []
-        
-    def add_edge(self, node):
-        if node not in self.edge_nodes:
-            self.edge_nodes.append(node)
-        if self not in node.edge_nodes:
-            node.edge_nodes.append(self)
-        
-    def __eq__(self, other):
-        return self.coords == other.coords
-
-    def __hash__(self):
-        return hash(tuple(self.coords))
-        
-    def __repr__(self):
-        return f"({self.coords})"
-
-
-class Polygon:
-    def __init__(self, nodes):
-        self.nodes = nodes
-    
-    def get_nodes(self):
-        return [node.coords for node in self.nodes]
-        
-    def __eq__(self, other):
-        # Check if two polygons have the same set of nodes.
-        return set(self.nodes) == set(other.nodes)
-
-    def __iter__(self):
-        return iter(self.nodes)
-        
-    def __repr__(self):
-        return f"Polygon({', '.join([str(node) for node in self.nodes])})"
-
-
-class Graph:
-    def __init__(self):
-        self.nodes = []
-        self.nodes_with_edges = {}
-        self.used_edges = set()
-        self.polygons = []
-
-    def _get_or_create_node(self, coords):
-        node = next((n for n in self.nodes if n.coords == coords), None)
-        if node is None:
-            node = Node(coords)
-            self.nodes.append(node)
-        return node
-
-    def add_edge(self, coords1, coords2):
-        node1 = self._get_or_create_node(coords1)
-        node2 = self._get_or_create_node(coords2)
-        node1.add_edge(node2)
-
-    def retrieve_polygons(self):
-        for start_node in self.nodes:
-            visited = set()  # Reset visited nodes for each starting node
-            stack = [(start_node, [start_node])]
-            
-            while stack:
-                current, path = stack.pop()
-                visited.add(current)
-                
-                for neighbor in current.edge_nodes:
-                    if neighbor == path[0] and len(path) > 2:  # cycle found
-                        new_polygon = Polygon(path + [path[0]])  # Close the loop by appending starting node
-                        if new_polygon not in self.polygons:
-                            self.polygons.append(new_polygon)
-                    elif neighbor not in path and neighbor not in visited:
-                        new_path = list(path)
-                        new_path.append(neighbor)
-                        stack.append((neighbor, new_path))
-
-    def retrieve_polygons(self):
-        for start_node in self.nodes:
-            stack = [(start_node, [start_node])]
-            
-            while stack:
-                current, path = stack.pop()
-                
-                for neighbor in current.edge_nodes:
-                    if neighbor == path[0] and len(path) > 2:  # cycle found
-                        new_polygon = Polygon(path + [path[0]])  # Close the loop by appending starting node
-                        if new_polygon not in self.polygons:
-                            self.polygons.append(new_polygon)
-                    elif neighbor not in path:
-                        new_path = list(path)
-                        new_path.append(neighbor)
-                        stack.append((neighbor, new_path))
-    
-    def retrieve_polygons(self):
-        for start_node in self.nodes:
-            for neighbor in start_node.edge_nodes:
-                visited = set([start_node])
-                stack = [(neighbor, [start_node, neighbor])]
-
-                while stack:
-                    current, path = stack.pop()
-                    visited.add(current)
-
-                    for next_node in current.edge_nodes:
-                        if next_node == path[0] and len(path) > 2:  # cycle found
-                            new_polygon = Polygon(path + [path[0]])  # Close the loop by appending starting node
-                            if new_polygon not in self.polygons:
-                                self.polygons.append(new_polygon)
-                        elif next_node not in path and next_node not in visited:
-                            new_path = list(path)
-                            new_path.append(next_node)
-                            stack.append((next_node, new_path))
-    
-    def __repr__(self):
-        return f"Graph with {len(self.nodes)} nodes and {len(self.polygons)} polygons"
-
-
-def canonical_form(polygon):
-    """
-    Convert the polygon into its canonical form.
-    """
-    coords_list = [tuple(node.coords) for node in polygon.nodes]
-    min_index = min(range(len(coords_list)), key=lambda i: coords_list[i])
-    rotated_coords = tuple(coords_list[min_index:] + coords_list[:min_index])
-    
-    return rotated_coords
+def polygons_to_geojson(polygons):
+    """Generate a GeoJSON object for a list of polygons."""
+    features = polygons
+    return {
+        "type": "FeatureCollection",
+        "features": features
+    }
 
 def remove_duplicate_polygons(polygons):
     seen = set()
     unique_polygons = []
 
     for polygon in polygons:
-        canon = canonical_form(polygon)
-        if canon not in seen:
-            seen.add(canon)
+        # Create a canonical representation by sorting nodes in the polygon
+        # Using tuple of tuples as a representation to make it hashable
+        canonical = tuple(sorted((node.x, node.y, node.z) for node in polygon))
+        if canonical not in seen:
+            seen.add(canonical)
             unique_polygons.append(polygon)
 
     return unique_polygons
 
-def is_subset(polygon_a, polygon_b):
-    """
-    Check if polygon_a is a subset of polygon_b.
-    """
-    return all(point in polygon_b for point in polygon_a)
+def filter_polygons_by_area(polygons, min_area=1e-2):
+    """Remove polygons with an area smaller than min_area."""
+    
+    polygons = [Polygon(polygon) for polygon in polygons]
+    
+    for p in polygons:
+        p.calculate_area()
+    
+    polygons = [polygon for polygon in polygons if polygon.area >= min_area]
+    polygons = sorted(polygons, key=lambda p: p.area, reverse=True)
+
+    return polygons
+
+def share_edges(poly1, poly2):
+    """Check if two polygons share any edges."""
+    for i in range(len(poly1) - 1):
+        edge1 = (poly1[i], poly1[i+1])
+        for j in range(len(poly2) - 1):
+            edge2 = (poly2[j], poly2[j+1])
+            if edge1 == edge2 or edge1 == (edge2[1], edge2[0]):
+                return True
+    return False
+
+def is_contained(smaller, larger):
+    """Check if the smaller polygon is partly or wholly contained in the larger polygon."""
+    # Note: For a more precise check, consider using a point-in-polygon algorithm.
+    # For simplicity, here we're checking if any vertex of the smaller polygon is inside the larger polygon.
+    for vertex in smaller:
+        if point_in_polygon(vertex, larger):
+            return True
+    return False
+
+def point_in_polygon(point, polygon):
+    """Determine if a point is inside a polygon."""
+    n = len(polygon)
+    odd_nodes = False
+    j = n - 1  # The last vertex is the previous one to compare with the first.
+
+    for i in range(n):
+        if polygon[i].y < point.y and polygon[j].y >= point.y or polygon[j].y < point.y and polygon[i].y >= point.y:
+            if polygon[i].x + (point.y - polygon[i].y) / (polygon[j].y - polygon[i].y) * (polygon[j].x - polygon[i].x) < point.x:
+                odd_nodes = not odd_nodes
+        j = i
+
+    return odd_nodes
+
+def compute_area(polygon):
+    """Compute the area of a 2D polygon using the Shoelace formula."""
+    n = len(polygon) - 1  # The last vertex is the same as the first
+    area = 0
+    for i in range(n):
+        j = (i + 1) % n
+        area += polygon[i].x * polygon[j].y
+        area -= polygon[j].x * polygon[i].y
+    area = abs(area) / 2.0
+    return area
+
+def polygons_share_edge(p1, p2):
+    """Check if two polygons share an edge."""
+    for i in range(len(p1)-1):
+        for j in range(len(p2)-1):
+            if (p1[i] == p2[j] and p1[i+1] == p2[j+1]) or (p1[i] == p2[j+1] and p1[i+1] == p2[j]):
+                return True
+    return False
+
+def is_fully_contained(inside, outside):
+    """Check if every vertex of the first polygon is inside the second one."""
+    return all([point_in_polygon(v, outside) for v in inside])
 
 def filter_polygons(polygons):
-    """
-    Filter out polygons that are supersets of another polygon.
-    """
-    filtered_polygons = []
-    for polygon in polygons:
-        if not any(is_subset(other, polygon) for other in polygons if other != polygon):
-            filtered_polygons.append(polygon)
-    return filtered_polygons
+    """Filter polygons based on given criteria."""
+    to_remove = set()
 
-def polygons_to_geojson(polygons):
-    """
-    Convert a list of polygons to a GeoJSON feature collection.
-    """
-    geojson = {
-        "type": "FeatureCollection",
-        "features": []
-    }
+    for i, poly1 in enumerate(polygons):
+        for j, poly2 in enumerate(polygons):
+            if i != j:
+                if polygons_share_edge(poly1, poly2):
+                    if compute_area(poly1) < compute_area(poly2) and is_fully_contained(poly1, poly2):
+                        to_remove.add(tuple(poly2))
+                    elif compute_area(poly2) < compute_area(poly1) and is_fully_contained(poly2, poly1):
+                        to_remove.add(tuple(poly1))
 
-    for polygon in polygons:
-        feature = {
-            "type": "Feature",
-            "geometry": {
-                "type": "Polygon",
-                "coordinates": [polygon.get_nodes()]
-            },
-            "properties": {}
-        }
-        geojson['features'].append(feature)
-
-    return geojson
-
+    return [polygon for polygon in polygons if tuple(polygon) not in to_remove]
 
 if __name__ == "__main__":
     
     # Get the database cursor for retrieving data
     cur = get_cursor()
-
     # Create the query with the correct bounding box and srid
-    query = get_query(482000, 6471000, 483000, 6472000, 25832)
-    
+    query = get_query(481000, 6471000, 481500, 6471500, 25832)
     # Execute the query
     cur.execute(query)
-    
     # Get all of the results
     results = cur.fetchall()
     
-    # geojson for storing all of the data
-    geojson = dict(type="FeatureCollection", features=[])
-    
-    polygons = []
-    
     # The results are currently grouped per building, therefore we have a unique building
     # id for each building and we know which polygons correspond to which building
+    
+    
+    geojson_polygons = list()
+    
     for residx, result in enumerate(results):
         
-        feature = dict(type="Feature", properties=dict(id=result[0]), geometry=[])
-        point = dict(type="Point", coordinates=None)
-        
         building_id = result[0]
-        geometries = result[1:]
+        geometries = result[1:]        
         
-        building_omrade = geometries[0]
-        monelinjer = geometries[1]
-        takkanter = geometries[2]
-        bygningslinjer = geometries[3]
-        taksprang = geometries[4]
-        
-        
-        # Parse the geometries
-        #building_omrade = json.loads(building_omrade)
-        # Remove crs from dictionary
-        #building_omrade.pop("crs", None)
-        # Add to geometries
-        #geojson["features"].append(building_omrade)
-        
-        if monelinjer != None:
-            #monelinje_points = extract_points(monelinjer, building_id)
-            monelinje_objects = extract_objects(monelinjer, building_id)
-            #geojson["features"].extend(monelinje_points)
-            geojson["features"].extend(monelinje_objects)
-        else:
-            print("monelinjer is None")
-        
-        if takkanter != None:
-            #takkant_points = extract_points(takkanter, building_id)
-            takkant_objects = extract_objects(takkanter, building_id)
-            #geojson["features"].extend(takkant_points)
-            geojson["features"].extend(takkant_objects)
-        else:
-            print("takkanter is None")
-        
-        if bygningslinjer != None:
-            #bygningslinje_points = extract_points(bygningslinjer, building_id)
-            bygningslinje_objects = extract_objects(bygningslinjer, building_id)
-            #geojson["features"].extend(bygningslinje_points)
-            geojson["features"].extend(bygningslinje_objects)
-        else:
-            print("bygningslinjer is None")
-        
-        if taksprang != None:
-            #takspring_points = extract_points(taksprang, building_id)
-            takspring_objects = extract_objects(taksprang, building_id)
-            #geojson["features"].extend(takspring_points)
-            geojson["features"].extend(takspring_objects)
-        else:
-            print("taksprang is None")
-            
-        # data = geojson["features"]
-        
-        # geojson["features"] = []
-        
-        
-        def round_coords(coords):
-            return [round(c, 0) for c in coords]
-
-        data = geojson["features"]
-        geojson["features"] = []
-
         graph = Graph()
         
-        for feature in data:
-            coords = feature['geometry']['coordinates']
-            for coordx in range(len(coords) - 1):
-                graph.add_edge(coords[coordx], coords[coordx + 1])
+        for gidx, geometry in enumerate(geometries):
+            
+            strings = list()
+            
+            if isinstance(geometry, str):
+                strings.append(geometry)
+            elif isinstance(geometry, list) and geometry[0] is not None:
+                for g in geometry:
+                    strings.append(g)
+            else:
+                continue
+                
+            for geometry_string in strings:
+                
+                geom = json.loads(geometry_string)
 
-        for node in graph.nodes:
-            print("Node:", node, " | Edges:", [edge.coords for edge in node.edge_nodes])
+                nodes = geom["coordinates"]
+                
+                for nodex in range(len(nodes) - 1):
+                    curr_node = Node(*nodes[nodex])
+                    next_node = Node(*nodes[nodex + 1])
+                    graph.add_node(curr_node)
+                    graph.add_node(next_node)
+                    graph.connect_nodes(curr_node, next_node)
         
-        graph.retrieve_polygons()
+        graph.remove_duplicate_nodes() # There exists a lot of duplicate nodes from the linestrings
         
-        for p in graph.polygons:
-            print(p, "\n")
+        graph = split_edges(graph) # If a node is on an edge, then merge the node into the edge
         
-        unique_polygons = filter_polygons(graph.polygons)
+        graph.populate_node_neighbours() # It is easier to traverse the graph using neighbor attribute, so populate it
         
-        print("\nUNIQUE\n")
+        polygons = graph.find_polygons() # Find polygons in the graph
         
-        for p in unique_polygons:
-            print(p, "\n")
+        print("num polygons:", len(polygons), "for building", building_id)
         
-        polygons.extend(unique_polygons)
+        polygons = remove_duplicate_polygons(polygons) # Remove all of the duplicate polygons (if any)
+        print("num polygons:", len(polygons), "for building", building_id)
         
-    geojson_string = polygons_to_geojson(polygons)
+        #polygons = filter_polygons(polygons) # 
+        #print("num polygons:", len(polygons), "for building", building_id)
+        
+        polygons = filter_polygons_by_area(polygons, 1)
+        print("num polygons:", len(polygons), "for building", building_id)
+        
+        print("")
+        
+        for polygon in polygons:
+            geojson_polygons.append(generate_geojson(polygon))
     
-    with open(f"linjer_{residx}.json", "w") as f:
-        json.dump(geojson_string, f)
+    with open("polygons_2.json", "w") as f:
+        f.write(json.dumps(polygons_to_geojson(geojson_polygons)))
