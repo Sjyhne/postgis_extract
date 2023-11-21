@@ -1,7 +1,7 @@
 WITH pre_filtered_buildings AS (
     SELECT objid, omrade
     FROM fkb_bygning.bygning
-    WHERE ST_Within(omrade, ST_TRANSFORM(ST_MAKEENVELOPE(minX, minY, maxX, maxY, srid), 5973))  -- assuming original_srid is the SRID of fkb_bygning.bygning table
+    WHERE ST_INTERSECTS(omrade, ST_TRANSFORM(ST_MAKEENVELOPE(minX, minY, maxX, maxY, srid), 5973))  -- assuming original_srid is the SRID of fkb_bygning.bygning table
 ),
 
 aggregated_data AS (
