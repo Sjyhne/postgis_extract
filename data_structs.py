@@ -97,6 +97,32 @@ class Graph:
         for node in self.nodes:
             node.edges = [edge for edge in self.edges if edge.node1 == node or edge.node2 == node]
     
+    def remove_duplicate_nodes(self):
+        unique_nodes = { (node.x, node.y, node.z): node for node in self.nodes }
+        self.nodes = list(unique_nodes.values())
+
+        # Directly reconstruct edges to ensure no invalid or duplicate edges
+        edge_keys = set()
+        new_edges = []
+        for edge in self.edges:
+            key1, key2 = (edge.node1.x, edge.node1.y, edge.node1.z), (edge.node2.x, edge.node2.y, edge.node2.z)
+            if key1 != key2:  # Ensure the edge connects two distinct nodes
+                sorted_edge = tuple(sorted([key1, key2]))
+                if sorted_edge not in edge_keys:
+                    edge_keys.add(sorted_edge)
+                    new_edges.append(Edge(unique_nodes[key1], unique_nodes[key2]))
+
+        self.edges = new_edges
+
+        # Efficiently update node edges
+        node_to_edges = {node: [] for node in self.nodes}
+        for edge in self.edges:
+            node_to_edges[edge.node1].append(edge)
+            node_to_edges[edge.node2].append(edge)
+
+        for node in self.nodes:
+            node.edges = node_to_edges[node]
+    
     def is_simple_polygon(self, polygon):
         """
         Check if the given polygon is simple (no other nodes lie within it).

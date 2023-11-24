@@ -13,8 +13,6 @@ aggregated_data AS (
         ARRAY_AGG(tsb.grense) AS taksprangbunn_geometries,
         ARRAY_AGG(m.grense) AS monelinje_geometries,
         ARRAY_AGG(bl.grense) AS bygningslinje_geometries,
-        ARRAY_AGG(v.grense) AS veranda_geometries,
-        ARRAY_AGG(tb.grense) AS trappbygg_geometries,
         ARRAY_AGG(bb.grense) AS bygningbru_geometries,
         ARRAY_AGG(tobk.grense) AS takoverbyggkant_geometries
     FROM 
@@ -29,10 +27,6 @@ aggregated_data AS (
         fkb_bygning.monelinje m ON ST_INTERSECTS(b.omrade, m.grense)
     LEFT JOIN 
         fkb_bygning.bygningslinje bl ON ST_INTERSECTS(b.omrade, bl.grense)
-    LEFT JOIN 
-        fkb_bygning.veranda v ON ST_INTERSECTS(b.omrade, v.grense)
-    LEFT JOIN 
-        fkb_bygning.trappbygg tb ON ST_INTERSECTS(b.omrade, tb.grense)
     LEFT JOIN 
         fkb_bygning.bygningbru bb ON ST_INTERSECTS(b.omrade, bb.grense)
     LEFT JOIN 
@@ -50,8 +44,6 @@ expanded_data AS (
         unnest(bygningslinje_geometries) AS bygningslinje_geometry,
         unnest(taksprang_geometries) AS taksprang_geometry,
         unnest(taksprangbunn_geometries) AS taksprangbunn_geometry,
-        unnest(veranda_geometries) AS veranda_geometry,
-        unnest(trappbygg_geometries) AS trappbygg_geometry,
         unnest(bygningbru_geometries) AS bygningbru_geometry,
         unnest(takoverbyggkant_geometries) AS takoverbyggkant_geometry
     FROM 
@@ -66,8 +58,6 @@ SELECT
     ARRAY_AGG(ST_ASGEOJSON(ST_TRANSFORM(bygningslinje_geometry, srid))) FILTER (WHERE bygningslinje_geometry IS NOT NULL) AS transformed_bygningslinje_geojson,
     ARRAY_AGG(ST_ASGEOJSON(ST_TRANSFORM(taksprang_geometry, srid))) FILTER (WHERE taksprang_geometry IS NOT NULL) AS transformed_taksprang_geojson,
     ARRAY_AGG(ST_ASGEOJSON(ST_TRANSFORM(taksprangbunn_geometry, srid))) FILTER (WHERE taksprangbunn_geometry IS NOT NULL) AS transformed_taksprangbunn_geojson,
-    ARRAY_AGG(ST_ASGEOJSON(ST_TRANSFORM(veranda_geometry, srid))) FILTER (WHERE veranda_geometry IS NOT NULL) AS transformed_veranda_geojson,
-    ARRAY_AGG(ST_ASGEOJSON(ST_TRANSFORM(trappbygg_geometry, srid))) FILTER (WHERE trappbygg_geometry IS NOT NULL) AS transformed_trappbygg_geojson,
     ARRAY_AGG(ST_ASGEOJSON(ST_TRANSFORM(bygningbru_geometry, srid))) FILTER (WHERE bygningbru_geometry IS NOT NULL) AS transformed_bygningbru_geojson,
     ARRAY_AGG(ST_ASGEOJSON(ST_TRANSFORM(takoverbyggkant_geometry, srid))) FILTER (WHERE takoverbyggkant_geometry IS NOT NULL) AS transformed_takoverbyggkant_geojson
 FROM 

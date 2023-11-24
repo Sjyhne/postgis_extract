@@ -3,8 +3,12 @@ from data_structs import Graph, Node, Edge, Polygon
 
 import json
 
+from tqdm import tqdm
+import argparse
+import time
+
 def get_query(x1, y1, x2, y2, srid):
-    with open("test_query.sql", "r") as f:
+    with open("query.sql", "r") as f:
         query = f.read()
         query = query.replace("minX", str(x1))
         query = query.replace("minY", str(y1))
@@ -17,7 +21,7 @@ def get_query(x1, y1, x2, y2, srid):
     return query
 
 
-def generate_geojson(data, type):
+def generate_geojson(data, type, building_id):
     """Generate a GeoJSON representation for a given polygon."""
     
     if type == "Polygon":
@@ -36,7 +40,7 @@ def generate_geojson(data, type):
             "type": f"{type}",
             "coordinates": coordinates
         },
-        "properties": {}
+        "properties": {"building_id": building_id}
     }
 
 # Split edges that have a node directly on them
@@ -73,7 +77,7 @@ def distance(node1, node2):
     return ((node1.x - node2.x)**2 + (node1.y - node2.y)**2 + (node1.z - node2.z)**2) ** 0.5
 
 
-def polygons_to_geojson(polygons):
+def data_to_geojson(polygons):
     """Generate a GeoJSON object for a list of polygons."""
     features = polygons
     return {
@@ -216,82 +220,150 @@ def extract_data_from_query(results):
             for geometry_string in strings:
                 
                 geom = json.loads(geometry_string)
-
                 nodes = geom["coordinates"]
-                
-                for nodex in range(len(nodes) - 1):
-                    curr_node = Node(*nodes[nodex])
-                    next_node = Node(*nodes[nodex + 1])
-                    graph.add_node(curr_node)
-                    graph.add_node(next_node)
-                    graph.connect_nodes(curr_node, next_node)
+                if not isinstance(nodes[0][0], list):
+                    nodes = [nodes]
+                for polygon in nodes:
+                    for nodex in range(len(polygon) - 1):
+                        curr_node = Node(*polygon[nodex])
+                        next_node = Node(*polygon[nodex + 1])
+                        graph.add_node(curr_node)
+                        graph.add_node(next_node)
+                        graph.connect_nodes(curr_node, next_node)
         
+        
+        start = time.time()
         graph.remove_duplicate_nodes() # There exists a lot of duplicate nodes from the linestrings
+        end = time.time()
+        print("Removed duplicate nodes in {} seconds".format(end - start))
         
-        
+        start = time.time()
         graph = split_edges(graph) # If a node is on an edge, then merge the node into the edge
+        end = time.time()
+        print("Split edges in {} seconds".format(end - start))
         
+        start = time.time()
         graph.populate_node_neighbours() # It is easier to traverse the graph using neighbor attribute, so populate it
+        end = time.time()
+        print("Populated node neighbours in {} seconds".format(end - start))
         
+        start = time.time()
         polygons = graph.find_polygons() # Find polygons in the graph
+        end = time.time()
+        print("Found polygons in {} seconds".format(end - start))
         
+        start = time.time()
         polygons = remove_duplicate_polygons(polygons) # Remove all of the duplicate polygons (if any)
+        end = time.time()
+        print("Removed duplicate polygons in {} seconds".format(end - start))
         
+        start = time.time()
         polygons = filter_polygons_by_area(polygons, 1) # Remove all polygons smaller than a certain area
+        end = time.time()
+        print("Filtered polygons by area in {} seconds".format(end - start))
         
         #print("")
         
-        #print("Found {} polygons for building {}".format(len(polygons), building_id))
+        # print("Found {} polygons for building {}".format(len(polygons), building_id))
         
-        polygons = [generate_geojson(polygon, "Polygon") for polygon in polygons]
-        points = [generate_geojson(node, "Point") for node in graph.nodes]
+        polygons = [generate_geojson(polygon, "Polygon", building_id) for polygon in polygons]
+        points = [generate_geojson(node, "Point", building_id) for node in graph.nodes]
         
         query_polygons.extend(polygons)
         query_points.extend(points)
                 
     return query_polygons, query_points
 
-if __name__ == "__main__":
+def generate_query_boxes(xmin, ymin, xmax, ymax, box_width, box_height):
+    smaller_boxes = []
+
+    current_xmin = xmin
+    while current_xmin < xmax:
+        current_ymin = ymin
+        while current_ymin < ymax:
+            # Calculate the top-right coordinates of the smaller box
+            current_xmax = min(current_xmin + box_width, xmax)
+            current_ymax = min(current_ymin + box_height, ymax)
+
+            # Add the smaller box to the list
+            smaller_boxes.append((current_xmin, current_ymin, current_xmax, current_ymax))
+
+            # Move to the next box vertically
+            current_ymin += box_height
+
+        # Move to the next box horizontally
+        current_xmin += box_width
+
+    return smaller_boxes
+
+
+def parse_args():
+    parser = argparse.ArgumentParser(description='PostGIS Extract')
+    parser.add_argument('-v', '--verbose', action='store_true', help='Enable verbose output')
+    return parser.parse_args()
+
+if __name__ == "__main__":    
     
     # Get the database cursor for retrieving data
     cur = get_cursor()
     
-    bounding_box = (481000, 6471000, 481100, 6471100)
+    args = parse_args()
+    
+    bounding_box = (472200, 6465700, 473000, 6466700)
     
     # Split the bounding box into smaller chunks to enable faster queries
     # The smaller the chunks, the faster the queries, but the more queries we have to make
     # The larger the chunks, the slower the queries, but the less queries we have to make
     # The optimal chunk size is dependent on the data and the database
     # For this dataset, a chunk size of 100x100 meters seems to be optimal
-    chunk_size = 50
+    box_size = [10, 10]
+    
+    boxes = generate_query_boxes(*bounding_box, *box_size)
+    
+    if args.verbose:
+        print("Bounding box: {}".format(bounding_box))
+        print("Box size: {}".format(box_size))
+        print("Number of boxes: {}".format(len(boxes)))
     
     # Create a list of all of the queries we need to make
     geojson_polygons = list()
     geojson_points = list()
     
-    for x in range(bounding_box[0], bounding_box[2], chunk_size):
-        for y in range(bounding_box[1], bounding_box[3], chunk_size):
-            query = get_query(x, y, x + chunk_size, y + chunk_size, 25832)
-            print("Running query for chunk ({}, {})".format(x, y))
-            cur.execute(query)
-            result = cur.fetchall()
+    for boxid, box in tqdm(enumerate(boxes), total=len(boxes)):
+        query = get_query(*box, 25832)
+        
+        if args.verbose:
+            print("Running query for chunk ({}, {})".format(box[0], box[3]))
+        
+        start = time.time()
+        cur.execute(query)
+        result = cur.fetchall()
+        end = time.time()
+        
+        print("Query took {} seconds".format(end - start))
+        
+        if args.verbose:
             print("Found {} buildings - Extracting data".format(len(result)))
-                
-            polygons, points = extract_data_from_query(result)
-                
+        
+        start = time.time()
+        polygons, points = extract_data_from_query(result)
+        end = time.time()
+        
+        print("Extracted data in {} seconds".format(end - start))
+        
+        if args.verbose:
             print("Finished extracting data")
-                
-            if polygons is None:
-                continue
-            if points is None:
-                continue
             
-            geojson_polygons.extend(polygons)
-            geojson_points.extend(points)
-            
+        if polygons is None:
+            continue
+        if points is None:
+            continue
+        
+        geojson_polygons.extend(polygons)
+        geojson_points.extend(points)
     
-    geojson_polygons = polygons_to_geojson(geojson_polygons)
-    geojson_points = polygons_to_geojson(geojson_points)
+    geojson_polygons = data_to_geojson(geojson_polygons)
+    geojson_points = data_to_geojson(geojson_points)
     
     with open("polygons.json", "w") as f:
         f.write(json.dumps(geojson_polygons))
@@ -370,4 +442,4 @@ if __name__ == "__main__":
             geojson_polygons.append(generate_geojson(polygon))
             
     with open("polygons_2.json", "w") as f:
-        f.write(json.dumps(polygons_to_geojson(geojson_polygons)))
+        f.write(json.dumps(data_to_geojson(geojson_polygons)))
