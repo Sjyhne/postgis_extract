@@ -1,1 +1,1 @@
-from .connection import get_cursor
+from .connection import get_cursor, close_cursor
